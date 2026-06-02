@@ -1,0 +1,9 @@
+__pycache__/
+.pytest_cache/
+.DS_Store
+.idea/
+.venv/
+generated_data/
+raw_data/
+analytics_data/
+reports/
