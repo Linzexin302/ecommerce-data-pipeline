@@ -1,6 +1,6 @@
 # E-commerce Data Pipeline
 
-This portfolio project demonstrates how to build a production-style analytics data
+This project build a production-style analytics data
 pipeline. Step 1 creates a synthetic operational source system:
 
 - PostgreSQL tables for customers, products, orders, and order items
