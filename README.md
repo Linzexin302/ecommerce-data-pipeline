@@ -1,220 +1,218 @@
-# E-commerce Data Pipeline
+# E-commerce Customer Behavior Data Pipeline
 
-This portfolio project demonstrates how to build a production-style analytics data
-pipeline. Step 1 creates a synthetic operational source system:
+## 1. Executive Summary
 
-- PostgreSQL tables for customers, products, orders, and order items
-- JSONL web events partitioned by event date
-- Reproducible test data controlled by a random seed
-- Automated tests for the generator
+This project builds an end-to-end e-commerce analytics pipeline for understanding customer behavior, churn risk, product engagement, and customer value. The business problem is that retail teams often have customer, order, product, and web-event data stored in separate operational systems, making it difficult to answer questions such as which customers are likely to churn, which segments generate the highest lifetime value, and where customers abandon the purchase journey.
 
-Step 2 incrementally copies source data into an immutable raw layer:
+The solution is a reproducible data pipeline that generates realistic retail source data, ingests it into an immutable raw layer, transforms it into analytics-ready dimensional tables and marts, and exports CSV reports for dashboarding in Tableau.
 
-- Timestamp and primary-key watermarks for PostgreSQL tables
-- SHA-256 checksums for idempotent JSONL event ingestion
-- Local ingestion state and append-only pipeline-run metadata
+## 2. Business Problem
 
-Step 3 rebuilds analytics-ready tables from the immutable raw history:
+Retail teams need a reliable way to turn raw customer activity into business insights. In this project, the goal is to support analysis for:
 
-- Deduplicated staging tables for PostgreSQL records and JSONL events
-- Customer and product dimensions plus order, item, and event facts
-- Daily sales and product-performance marts
-- Data-quality checks before publishing a local SQLite analytics database
+- Customer churn prediction
+- Customer segmentation
+- Customer lifetime value analysis
+- Cart abandonment behavior
+- Product and sales performance reporting
 
-## Why Start Here?
+The pipeline is designed to answer questions such as:
 
-A data pipeline needs a realistic source. The generator gives us stable data for
-development and testing without relying on an external API. Later steps will add
-controlled duplicates, malformed values, delayed events, extraction, dbt models,
-orchestration, and monitoring.
+- Which customer segments have the highest churn rate?
+- Which customer groups generate the highest lifetime value?
+- How do browsing sessions, order frequency, and cart abandonment relate to churn?
+- Which product and behavioral signals should be monitored in a retail dashboard?
 
-## Project Structure
+## 3. Methodology
 
-```text
-.
-├── data_generator/
-│   └── generate.py
-├── ingestion/
-│   ├── extract_postgres.py
-│   ├── ingest_events.py
-│   ├── raw_io.py
-│   ├── run_pipeline.py
-│   └── state.py
-├── transformation/
-│   └── build_analytics.py
-├── reporting/
-│   └── export_reports.py
-├── sql/
-│   └── init.sql
-├── tests/
-├── raw_data/                 # created by Step 2 and ignored by Git
-├── analytics_data/           # created by Step 3 and ignored by Git
-├── reports/                  # created from analytics marts and ignored by Git
-├── Makefile
-├── docker-compose.yml
-└── requirements.txt
-```
+### 3.1 Source Data Generation
 
-## Quick Start
+The project starts by creating a synthetic e-commerce source system. This makes the project reproducible and avoids relying on private company data. The generator creates both structured operational data and semi-structured behavioral event data.
 
-Create a virtual environment and install Python dependencies:
+The structured source data is loaded into PostgreSQL and includes:
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+- `customers`
+- `products`
+- `orders`
+- `order_items`
 
-Start PostgreSQL:
-
-```bash
-docker compose up -d
-```
-
-Generate 30 days of source records and JSONL events:
-
-```bash
-python -m data_generator.generate \
-  --start-date 2026-01-01 \
-  --days 30 \
-  --seed 42 \
-  --database-url postgresql://ecommerce:ecommerce@localhost:5432/ecommerce
-```
-
-Generate JSONL files without loading PostgreSQL:
-
-```bash
-python -m data_generator.generate --start-date 2026-01-01 --days 7 --seed 42
-```
-
-Run tests:
-
-```bash
-pytest
-```
-
-Run the complete reproducible workflow:
-
-```bash
-make postgres-up
-make reproduce
-```
-
-If your shell has multiple Python environments active, verify which interpreter is
-being used:
-
-```bash
-which python
-which pytest
-```
-
-## Generated Events
-
-Events are written as newline-delimited JSON in date partitions:
+The semi-structured event data is written as newline-delimited JSON files partitioned by event date:
 
 ```text
-generated_data/events/event_date=2026-01-01/events.jsonl
+generated_data/events/event_date=YYYY-MM-DD/events.jsonl
 ```
 
-This layout mirrors a common object-storage pattern and prepares the project for
-incremental file ingestion in Step 2.
+The generator also creates customer profile snapshots for churn and segmentation analysis:
 
-## Step 2: Incremental Raw Ingestion
+```text
+generated_data/customer_profiles/customer_profiles.jsonl
+```
 
-Run the raw ingestion pipeline after PostgreSQL and the generated events are ready:
+Customer profiles include fields such as:
+
+- `segment`
+- `preferred_category`
+- `acquisition_channel`
+- `device_type`
+- `base_churn_risk_score`
+- `total_orders`
+- `total_spend`
+- `days_since_last_order`
+- `churn_label`
+
+The behavioral event stream includes customer actions such as:
+
+- page views
+- searches
+- product views
+- add-to-cart events
+- cart abandonment
+- wishlist additions
+- checkout starts
+- purchases
+
+The dataset is controlled by configurable parameters, including start date, number of days, random seed, customers per day, and orders per day. This allows the same data to be regenerated consistently.
+
+Example command:
 
 ```bash
-python -m ingestion.run_pipeline
+make generate DAYS=180 CUSTOMERS_PER_DAY=35 ORDERS_PER_DAY=200
 ```
 
-The first run extracts all source rows and copies all unseen event files. Run the
-same command again to test idempotency:
+### 3.2 Incremental Raw Ingestion
 
-```bash
-python -m ingestion.run_pipeline
-```
+After the source data is generated, the ingestion layer copies the source records into an immutable raw data layer. This step simulates a production data engineering pattern where raw source data is preserved before transformation.
 
-The second run should report zero records because the source has not changed.
+The PostgreSQL ingestion process extracts:
 
-Raw files are append-only:
+- customers
+- products
+- orders
+- order items
+
+The ingestion process uses timestamp and primary-key watermarks to support incremental loading. This prevents the pipeline from repeatedly extracting the same database records and also handles records that share the same timestamp.
+
+The JSONL ingestion process copies event files and customer profile snapshots into the raw layer using SHA-256 checksums. This makes the file ingestion idempotent: if the same file has already been processed, the pipeline will not duplicate it.
+
+Raw data is stored under:
 
 ```text
 raw_data/
 ├── postgres/
-│   ├── customers/
-│   ├── products/
-│   ├── orders/
-│   └── order_items/
 ├── events/
+├── customer_profiles/
 └── metadata/
-    ├── pipeline_runs.jsonl
-    └── state.json
 ```
 
-The state file stores the last successful checkpoint for each PostgreSQL table and
-the checksum of each processed event file. The pipeline uses both timestamp and
-primary-key values for PostgreSQL checkpoints so records with identical timestamps
-are still extracted safely.
+Pipeline run metadata and ingestion state are stored in:
 
-## Step 3: Analytics Transformations
-
-Build the analytics database after Step 2 has populated `raw_data/`:
-
-```bash
-python -m transformation.build_analytics
+```text
+raw_data/metadata/pipeline_runs.jsonl
+raw_data/metadata/state.json
 ```
 
-The command reads all immutable raw extracts, keeps the latest version of each
-record, runs data-quality checks, and atomically publishes:
+This design makes the pipeline auditable because each run records what was processed and whether the run succeeded or failed.
+
+### 3.3 Analytics Transformation
+
+The transformation step reads from the immutable raw layer and builds a local SQLite analytics database:
 
 ```text
 analytics_data/analytics.db
 ```
 
-The SQLite database contains:
+The transformation logic follows a warehouse-style structure:
 
-- `stg_*` tables with cleaned and deduplicated source records
-- `dim_customers` and `dim_products`
-- `fct_orders`, `fct_order_items`, and `fct_events`
-- `mart_daily_sales` for daily order and revenue reporting
-- `mart_product_performance` for cart-add, unit-sales, and revenue reporting
+1. Load raw JSONL extracts.
+2. Deduplicate records by primary key.
+3. Keep the latest version of each source record.
+4. Normalize events and customer profiles into staging tables.
+5. Run data quality checks.
+6. Build dimensions, fact tables, and reporting marts.
+7. Publish the SQLite database atomically.
 
-Query a mart from the command line:
+The analytics database includes staging tables such as:
 
-```bash
-sqlite3 -header -column analytics_data/analytics.db \
-  "SELECT * FROM mart_daily_sales ORDER BY order_date;"
-```
+- `stg_customers`
+- `stg_products`
+- `stg_orders`
+- `stg_order_items`
+- `stg_events`
+- `stg_customer_profiles`
 
-## Reporting Exports
+It then builds dimensional and fact tables:
 
-Export the reporting marts to CSV files:
+- `dim_customers`
+- `dim_products`
+- `dim_customer_profiles`
+- `fct_orders`
+- `fct_order_items`
+- `fct_events`
 
-```bash
-python -m reporting.export_reports
-```
+Finally, it creates business-facing marts:
 
-This creates:
+- `mart_daily_sales`
+- `mart_product_performance`
+- `mart_customer_churn_features`
+- `mart_customer_segments`
+
+The most important output for customer analytics is `mart_customer_churn_features`. It combines customer profile attributes, order behavior, and event activity into one customer-level table. This table supports Tableau analysis and future machine learning work.
+
+Example features include:
+
+- customer segment
+- preferred category
+- acquisition channel
+- device type
+- base churn risk score
+- order count
+- lifetime value
+- average order value
+- session count
+- product view count
+- add-to-cart count
+- cart abandon count
+- wishlist count
+- days since last order
+- churn label
+
+### 3.4 Data Quality Checks
+
+Before the analytics database is published, the pipeline runs data quality checks to catch broken relationships or invalid values. The checks validate that:
+
+- orders reference valid customers
+- order items reference valid orders
+- order items reference valid products
+- order statuses are valid
+- order totals are non-negative
+- order item quantities are positive
+- event types are known and expected
+
+If a check fails, the transformation step raises an error and does not publish the final analytics database. This protects the reporting layer from bad or incomplete data.
+
+### 3.5 Reporting Export
+
+The reporting step exports analytics marts to CSV files for Tableau:
 
 ```text
 reports/
 ├── daily_sales.csv
-└── product_performance.csv
+├── product_performance.csv
+├── customer_churn_features.csv
+└── customer_segments.csv
 ```
 
-The reports are generated outputs, so they are ignored by Git. Recreate them any
-time with `make export-reports`.
+The main Tableau dataset is:
 
-## Reproducibility Notes
+```text
+reports/customer_churn_features.csv
+```
 
-The project is reproducible because source data generation is controlled by:
+This file is customer-level and is used to build KPI cards, churn analysis, customer segment analysis, lifetime value charts, cart abandonment analysis, and customer behavior scatter plots.
 
-- `START_DATE`, defaulting to `2026-01-01`
-- `DAYS`, defaulting to `30`
-- `SEED`, defaulting to `42`
-- `DATABASE_URL`, defaulting to the local Docker PostgreSQL service
+### 3.6 Reproducible Workflow
 
-Use the default workflow:
+The complete project can be rebuilt from code using Makefile commands:
 
 ```bash
 make setup
@@ -223,18 +221,82 @@ make postgres-up
 make reproduce
 ```
 
-Or override values:
+The default workflow runs:
 
-```bash
-make reproduce START_DATE=2026-02-01 DAYS=14 SEED=7
-```
+1. data generation
+2. raw ingestion
+3. analytics transformation
+4. report export
+5. automated tests
 
-Generated folders are intentionally ignored by Git:
+Generated files are intentionally ignored by Git so the repository stays lightweight:
 
 - `generated_data/`
 - `raw_data/`
 - `analytics_data/`
 - `reports/`
 
-This keeps the GitHub repository small while proving that all outputs can be
-rebuilt from code.
+## 4. Skills
+
+### Data Engineering
+
+- Built a multi-step data pipeline from source generation to reporting output.
+- Designed an immutable raw data layer for PostgreSQL extracts, JSONL event files, and customer profile snapshots.
+- Implemented incremental ingestion using database watermarks and file checksums.
+- Created reproducible source data with configurable generation parameters and deterministic random seeds.
+- Used a Makefile to standardize project commands and support repeatable pipeline execution.
+
+### Data Modeling
+
+- Modeled operational source tables for customers, products, orders, and order items.
+- Built staging tables, dimension tables, fact tables, and analytics marts.
+- Created a customer-level churn feature mart combining profile, transaction, and behavioral event data.
+- Designed reporting marts for daily sales, product performance, customer churn, and customer segmentation.
+
+### SQL and Analytics
+
+- Used SQL transformations to aggregate revenue, order counts, customer counts, product performance, and behavioral features.
+- Created customer metrics such as lifetime value, average order value, session count, cart abandon count, and days since last order.
+- Built churn and segmentation outputs that can be used for dashboarding and future predictive modeling.
+- Validated relational integrity between customers, orders, order items, products, and events.
+
+### Python Development
+
+- Used Python to generate synthetic retail data, write JSONL files, load PostgreSQL tables, ingest raw files, transform data, and export CSV reports.
+- Used `pathlib`, `json`, `csv`, `sqlite3`, and `argparse` for file processing, command-line workflows, and local analytics storage.
+- Used `psycopg` to connect Python pipeline code with PostgreSQL.
+- Structured the project into separate modules for generation, ingestion, transformation, reporting, and testing.
+
+### Testing and Reproducibility
+
+- Added automated tests with `pytest` for generator behavior, event partitioning, customer profile fields, ingestion state, analytics transformations, and report exports.
+- Tested reproducibility by verifying that the same seed creates the same generated dataset.
+- Tested data correctness, including order totals matching order items and transformation logic keeping the latest raw record version.
+- Kept generated data out of Git while preserving commands to rebuild all outputs.
+
+### Business Intelligence
+
+- Exported Tableau-ready CSV datasets from analytics marts.
+- Prepared customer-level features for dashboard analysis, including churn rate, customer segment, lifetime value, session count, and cart abandonment behavior.
+- Supported business questions around customer retention, customer value, behavior patterns, and product performance.
+
+## 5. Results and Business Recommendation
+
+This section will summarize the final dashboard findings and business recommendations after the Tableau analysis is complete.
+
+Potential recommendation areas include:
+
+- retention strategy for high-churn segments
+- customer engagement strategy for casual browsers and at-risk users
+- product or checkout improvements for high cart abandonment groups
+- marketing channel optimization based on churn and customer value
+
+## 6. Next Steps
+
+Future improvements could include:
+
+- Add a machine learning model for churn prediction.
+- Replace rule-based customer segments with clustering, such as K-Means.
+- Add orchestration with Airflow or Prefect.
+- Add dbt models for more production-style transformations.
+- Add dashboard screenshots and final business insights to the README.
